@@ -1,31 +1,36 @@
+"""
+Copyright © 2021-2022 Tal Einat
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+This code is a copy from https://github.com/taleinat/python-stdlib-sentinels.
+"""
+
 import sys as _sys
-from threading import Lock as _Lock
+from threading import Lock
+from types import FrameType
+from typing import Dict, Optional, Self, cast, final
+
+__all__ = ["Sentinel"]
 
 
-__all__ = ['Sentinel']
-
-
-# Design and implementation decisions:
-#
-# The first implementations created a dedicated class for each instance.
-# However, once it was decided to use Sentinel for type signatures, there
-# was no longer a need for a dedicated class for each sentinel value on order
-# to enable strict type signatures.  Since class objects consume a relatively
-# large amount of memory, the implementation was changed to avoid this.
-#
-# With this change, the mechanism used for unpickling/copying objects needed
-# to be changed too, since we could no longer count on each dedicated class
-# simply returning its singleton instance as before.  __reduce__ can return
-# a string, upon which an attribute with that name is looked up in the module
-# and returned.  However, that would have meant that pickling/copying support
-# would depend on the "name" argument being exactly the name of the variable
-# used in the module, and simply wouldn't work for sentinels created in
-# functions/methods.  Instead, a registry for sentinels was added, where all
-# sentinel objects are stored keyed by their name + module name.  This is used
-# to look up existing sentinels both during normal object creation and during
-# copying/unpickling.
-
-
+@final
 class Sentinel:
     """Create a unique sentinel object.
 
@@ -36,46 +41,53 @@ class Sentinel:
     If not provided, "<name>" will be used (with any leading class names
     removed).
 
+    *bool_value* is the value (True/False) used for the sentinel object in
+    boolean contexts.
+
     *module_name*, if supplied, will be used instead of inspecting the call
     stack to find the name of the module from which
     """
+
     _name: str
     _repr: str
     _module_name: str
+    _bool_value: bool
 
     def __new__(
         cls,
         name: str,
-        repr: str | None = None,
-        module_name: str | None = None,
-    ):
+        repr: Optional[str] = None,
+        bool_value: bool = True,
+        module_name: Optional[str] = None,
+    ) -> Self | "Sentinel":
         name = str(name)
-        repr = str(repr) if repr else f'<{name.split(".")[-1]}>'
+        repr = repr or f'<{name.split(".")[-1]}>'
+        bool_value = bool(bool_value)
         if not module_name:
-            parent_frame = _get_parent_frame()
-            module_name = (
-                parent_frame.f_globals.get('__name__', '__main__')
-                if parent_frame is not None
-                else __name__
-            )
+            try:
+                module_name = cast(str, _get_parent_frame().f_globals.get("__name__", "__main__"))
+            except (AttributeError, ValueError):
+                module_name = __name__
 
-        # Include the class's module and fully qualified name in the
-        # registry key to support sub-classing.
-        registry_key = _sys.intern(
-            f'{cls.__module__}-{cls.__qualname__}-{module_name}-{name}'
-        )
-        sentinel = _registry.get(registry_key, None)
-        if sentinel is not None:
-            return sentinel
-        sentinel = super().__new__(cls)
-        sentinel._name = name
-        sentinel._repr = repr
-        sentinel._module_name = module_name
+        registry_key = _sys.intern(f"{module_name}-{name}")
         with _lock:
-            return _registry.setdefault(registry_key, sentinel)
+            sentinel = _registry.get(registry_key, None)
+            if sentinel is None:
+                sentinel = super().__new__(cls)
+                sentinel._name = name
+                sentinel._repr = repr
+                sentinel._bool_value = bool_value
+                sentinel._module_name = module_name
+
+                _registry[registry_key] = sentinel
+
+        return sentinel
 
     def __repr__(self):
         return self._repr
+
+    def __bool__(self):
+        return self._bool_value
 
     def __reduce__(self):
         return (
@@ -83,42 +95,19 @@ class Sentinel:
             (
                 self._name,
                 self._repr,
+                self._bool_value,
                 self._module_name,
             ),
         )
 
 
-_lock = _Lock()
-_registry: dict[str, Sentinel] = {}
+_lock = Lock()
+_registry: Dict[str, Sentinel] = {}
 
 
-# The following implementation attempts to support Python
-# implementations which don't support sys._getframe(2), such as
-# Jython and IronPython.
-#
-# The version added to the stdlib may simply return sys._getframe(2),
-# without the fallbacks.
-#
-# For reference, see the implementation of namedtuple:
-# https://github.com/python/cpython/blob/67444902a0f10419a557d0a2d3b8675c31b075a9/Lib/collections/__init__.py#L503
-def _get_parent_frame():
+def _get_parent_frame() -> FrameType:  # type: ignore
     """Return the frame object for the caller's parent stack frame."""
-    try:
-        # Two frames up = the parent of the function which called this.
-        return _sys._getframe(2)
-    except (AttributeError, ValueError):
-        global _get_parent_frame
-        def _get_parent_frame():
-            """Return the frame object for the caller's parent stack frame."""
-            try:
-                raise Exception
-            except Exception:
-                try:
-                    return _sys.exc_info()[2].tb_frame.f_back.f_back
-                except Exception:
-                    global _get_parent_frame
-                    def _get_parent_frame():
-                        """Return the frame object for the caller's parent stack frame."""
-                        return None
-                    return _get_parent_frame()
-        return _get_parent_frame()
+    return _sys._getframe(2)
+
+
+del Lock, final, Dict, Optional
