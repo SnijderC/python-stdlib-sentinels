@@ -1,4 +1,4 @@
-> # This is a fork
+# This is a fork
 
 This is a fork of https://github.com/taleinat/python-stdlib-sentinels that uses Pytest for testing and assumes a recent CPython version.
 
